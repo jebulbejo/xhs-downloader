@@ -1,7 +1,8 @@
 from flask import Flask, request, jsonify, make_response
 from flask_cors import CORS
-import yt_dlp
 import requests
+import re
+import json
 
 app = Flask(__name__)
 CORS(app, origins="*")
@@ -13,76 +14,113 @@ def after_request(response):
     response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
     return response
 
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+}
+
 def resolve_short_url(url):
+    """Resolve xhslink.com ke URL asli."""
     try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 MicroMessenger/8.0.20",
-            "Referer": "https://www.xiaohongshu.com/",
-        }
-        response = requests.get(url, allow_redirects=True, timeout=10, headers=headers)
-        return response.url
-    except:
+        session = requests.Session()
+        session.max_redirects = 10
+        resp = session.get(url, headers=HEADERS, timeout=15, allow_redirects=True)
+        return resp.url
+    except Exception as e:
         return url
 
+def extract_note_id(url):
+    """Extract note ID dari URL XHS."""
+    patterns = [
+        r'xiaohongshu\.com/explore/([a-f0-9]+)',
+        r'xiaohongshu\.com/discovery/item/([a-f0-9]+)',
+        r'xiaohongshu\.com/note/([a-f0-9]+)',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            return match.group(1)
+    return None
+
+def get_video_from_page(url):
+    """Scrape video URL langsung dari halaman XHS."""
+    session = requests.Session()
+    
+    # Set cookies minimal
+    session.cookies.set('a1', 'dummy', domain='.xiaohongshu.com')
+    
+    resp = session.get(url, headers=HEADERS, timeout=15)
+    html = resp.text
+
+    # Cari data video di dalam script tag
+    # XHS menyimpan data di window.__INITIAL_STATE__ atau similar
+    patterns = [
+        r'window\.__INITIAL_STATE__\s*=\s*({.*?})\s*;?\s*</script>',
+        r'"videoKey"\s*:\s*"([^"]+)"',
+        r'"masterUrl"\s*:\s*"([^"]+)"',
+        r'"originVideoKey"\s*:\s*"([^"]+)"',
+        r'https://sns-video-[^"\']+\.mp4[^"\']*',
+        r'https://[^"\']*xhscdn[^"\']*\.mp4[^"\']*',
+    ]
+    
+    # Cari URL video MP4 langsung
+    mp4_pattern = r'https://[^\s"\'<>]+\.mp4[^\s"\'<>]*'
+    mp4_urls = re.findall(mp4_pattern, html)
+    
+    if mp4_urls:
+        return {
+            "success": True,
+            "download_url": mp4_urls[0],
+            "title": "XHS Video",
+            "thumbnail": "",
+        }
+
+    # Cari di JSON state
+    state_match = re.search(r'window\.__INITIAL_STATE__=(.*?)</script>', html, re.DOTALL)
+    if state_match:
+        try:
+            state_str = state_match.group(1).strip().rstrip(';')
+            # Cari URL video di string JSON
+            video_urls = re.findall(r'https://[^"]+(?:mp4|video)[^"]*', state_str)
+            if video_urls:
+                return {
+                    "success": True,
+                    "download_url": video_urls[0],
+                    "title": "XHS Video",
+                    "thumbnail": "",
+                }
+        except:
+            pass
+
+    return None
+
 def get_video_info(url):
+    """Main function untuk get video info."""
+    # Resolve short URL
     if "xhslink.com" in url:
         url = resolve_short_url(url)
-
-    # Hapus parameter query yang tidak perlu
-    if "?" in url:
-        base_url = url.split("?")[0]
-        # Pastikan URL valid xiaohongshu
-        if "xiaohongshu.com" in base_url:
-            url = base_url
-
-    ydl_opts = {
-        "quiet": True,
-        "no_warnings": True,
-        "extract_flat": False,
-        "http_headers": {
-            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148",
-            "Referer": "https://www.xiaohongshu.com/",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-        },
-        "extractor_args": {
-            "xiaohongshu": {
-                "legacy_api": ["1"],
-            }
-        },
-    }
-
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=False)
+    
+    # Bersihkan URL dari parameter tracking
+    clean_url = url.split("?")[0] if "?" in url else url
+    
+    # Coba scrape dari halaman
+    result = get_video_from_page(clean_url)
+    if result:
+        return result
+    
+    # Coba URL dengan parameter xsec_token jika ada
+    result = get_video_from_page(url)
+    if result:
+        return result
         
-        formats = []
-        if "formats" in info:
-            for f in info["formats"]:
-                if f.get("vcodec") != "none" and f.get("url"):
-                    formats.append({
-                        "format_id": f.get("format_id", ""),
-                        "ext": f.get("ext", "mp4"),
-                        "quality": f.get("format_note", f.get("height", "unknown")),
-                        "url": f.get("url", ""),
-                        "filesize": f.get("filesize", 0),
-                    })
-
-        direct_url = ""
-        if formats:
-            # Ambil kualitas terbaik
-            best = sorted(formats, key=lambda x: x.get("filesize") or 0, reverse=True)
-            direct_url = best[0]["url"]
-        elif info.get("url"):
-            direct_url = info.get("url")
-
-        return {
-            "title": info.get("title", "Video"),
-            "thumbnail": info.get("thumbnail", ""),
-            "duration": info.get("duration", 0),
-            "uploader": info.get("uploader", "Unknown"),
-            "formats": formats,
-            "direct_url": direct_url,
-        }
+    return None
 
 @app.route("/")
 def index():
@@ -95,22 +133,27 @@ def download():
     try:
         data = request.get_json()
         url = data.get("url", "").strip()
+
         if not url:
             return jsonify({"error": "URL tidak boleh kosong"}), 400
+
         if "xiaohongshu.com" not in url and "xhslink.com" not in url:
             return jsonify({"error": "URL harus dari Xiaohongshu atau xhslink.com"}), 400
-        info = get_video_info(url)
-        direct_url = info.get("direct_url", "")
-        if not direct_url:
-            return jsonify({"error": "Tidak bisa mendapatkan URL download"}), 500
+
+        result = get_video_info(url)
+        
+        if not result or not result.get("download_url"):
+            return jsonify({"error": "Tidak bisa mengambil video. Pastikan link valid dan video bersifat publik."}), 500
+
         return jsonify({
             "success": True,
-            "download_url": direct_url,
-            "title": info.get("title", "video"),
-            "thumbnail": info.get("thumbnail", ""),
+            "download_url": result["download_url"],
+            "title": result.get("title", "XHS Video"),
+            "thumbnail": result.get("thumbnail", ""),
         })
+
     except Exception as e:
-        return jsonify({"error": f"Gagal memproses download: {str(e)}"}), 500
+        return jsonify({"error": f"Error: {str(e)}"}), 500
 
 if __name__ == "__main__":
     app.run(debug=False, host="0.0.0.0", port=5000)
