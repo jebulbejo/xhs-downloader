@@ -1,14 +1,19 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, make_response
 from flask_cors import CORS
 import yt_dlp
-import re
 import requests
 
 app = Flask(__name__)
-CORS(app)
+CORS(app, origins="*")
+
+@app.after_request
+def after_request(response):
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+    response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
+    return response
 
 def resolve_short_url(url):
-    """Resolve xhslink.com short URL ke URL asli."""
     try:
         response = requests.head(url, allow_redirects=True, timeout=10)
         return response.url
@@ -16,8 +21,6 @@ def resolve_short_url(url):
         return url
 
 def get_video_info(url):
-    """Extract info video dari Xiaohongshu."""
-    # Resolve short URL dulu
     if "xhslink.com" in url:
         url = resolve_short_url(url)
 
@@ -30,7 +33,6 @@ def get_video_info(url):
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=False)
         
-        # Ambil format video terbaik
         formats = []
         if "formats" in info:
             for f in info["formats"]:
@@ -56,48 +58,41 @@ def get_video_info(url):
 def index():
     return jsonify({"status": "ok", "message": "XHS Downloader API is running!"})
 
-@app.route("/api/info", methods=["POST"])
+@app.route("/api/info", methods=["POST", "OPTIONS"])
 def get_info():
-    """Endpoint untuk get info video."""
+    if request.method == "OPTIONS":
+        return make_response("", 200)
     try:
         data = request.get_json()
         url = data.get("url", "").strip()
-
         if not url:
             return jsonify({"error": "URL tidak boleh kosong"}), 400
-
         if "xiaohongshu.com" not in url and "xhslink.com" not in url:
             return jsonify({"error": "URL harus dari Xiaohongshu atau xhslink.com"}), 400
-
         info = get_video_info(url)
         return jsonify({"success": True, "data": info})
-
     except Exception as e:
         return jsonify({"error": f"Gagal mengambil info video: {str(e)}"}), 500
 
-@app.route("/api/download", methods=["POST"])
+@app.route("/api/download", methods=["POST", "OPTIONS"])
 def download():
-    """Endpoint untuk get direct download URL."""
+    if request.method == "OPTIONS":
+        return make_response("", 200)
     try:
         data = request.get_json()
         url = data.get("url", "").strip()
-
         if not url:
             return jsonify({"error": "URL tidak boleh kosong"}), 400
-
         info = get_video_info(url)
         direct_url = info.get("direct_url", "")
-
         if not direct_url:
             return jsonify({"error": "Tidak bisa mendapatkan URL download"}), 500
-
         return jsonify({
             "success": True,
             "download_url": direct_url,
             "title": info.get("title", "video"),
             "thumbnail": info.get("thumbnail", ""),
         })
-
     except Exception as e:
         return jsonify({"error": f"Gagal memproses download: {str(e)}"}), 500
 
