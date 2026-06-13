@@ -15,7 +15,11 @@ def after_request(response):
 
 def resolve_short_url(url):
     try:
-        response = requests.head(url, allow_redirects=True, timeout=10)
+        headers = {
+            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 MicroMessenger/8.0.20",
+            "Referer": "https://www.xiaohongshu.com/",
+        }
+        response = requests.get(url, allow_redirects=True, timeout=10, headers=headers)
         return response.url
     except:
         return url
@@ -24,10 +28,28 @@ def get_video_info(url):
     if "xhslink.com" in url:
         url = resolve_short_url(url)
 
+    # Hapus parameter query yang tidak perlu
+    if "?" in url:
+        base_url = url.split("?")[0]
+        # Pastikan URL valid xiaohongshu
+        if "xiaohongshu.com" in base_url:
+            url = base_url
+
     ydl_opts = {
         "quiet": True,
         "no_warnings": True,
         "extract_flat": False,
+        "http_headers": {
+            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148",
+            "Referer": "https://www.xiaohongshu.com/",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        },
+        "extractor_args": {
+            "xiaohongshu": {
+                "legacy_api": ["1"],
+            }
+        },
     }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -45,34 +67,26 @@ def get_video_info(url):
                         "filesize": f.get("filesize", 0),
                     })
 
+        direct_url = ""
+        if formats:
+            # Ambil kualitas terbaik
+            best = sorted(formats, key=lambda x: x.get("filesize") or 0, reverse=True)
+            direct_url = best[0]["url"]
+        elif info.get("url"):
+            direct_url = info.get("url")
+
         return {
             "title": info.get("title", "Video"),
             "thumbnail": info.get("thumbnail", ""),
             "duration": info.get("duration", 0),
             "uploader": info.get("uploader", "Unknown"),
             "formats": formats,
-            "direct_url": info.get("url", formats[0]["url"] if formats else ""),
+            "direct_url": direct_url,
         }
 
 @app.route("/")
 def index():
     return jsonify({"status": "ok", "message": "XHS Downloader API is running!"})
-
-@app.route("/api/info", methods=["POST", "OPTIONS"])
-def get_info():
-    if request.method == "OPTIONS":
-        return make_response("", 200)
-    try:
-        data = request.get_json()
-        url = data.get("url", "").strip()
-        if not url:
-            return jsonify({"error": "URL tidak boleh kosong"}), 400
-        if "xiaohongshu.com" not in url and "xhslink.com" not in url:
-            return jsonify({"error": "URL harus dari Xiaohongshu atau xhslink.com"}), 400
-        info = get_video_info(url)
-        return jsonify({"success": True, "data": info})
-    except Exception as e:
-        return jsonify({"error": f"Gagal mengambil info video: {str(e)}"}), 500
 
 @app.route("/api/download", methods=["POST", "OPTIONS"])
 def download():
@@ -83,6 +97,8 @@ def download():
         url = data.get("url", "").strip()
         if not url:
             return jsonify({"error": "URL tidak boleh kosong"}), 400
+        if "xiaohongshu.com" not in url and "xhslink.com" not in url:
+            return jsonify({"error": "URL harus dari Xiaohongshu atau xhslink.com"}), 400
         info = get_video_info(url)
         direct_url = info.get("direct_url", "")
         if not direct_url:
